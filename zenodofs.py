@@ -31,29 +31,42 @@ class ZenodoDirectory:
         self.directories = []
 
 class ZenodoFile:
-    def __init__(self, filename, size, type, content_url):
+    def __init__(self, inode, filename, type, content_url, mode, size, timestamp):
+        self.inode = inode
         self.filename = filename
         self.size = size
         self.type = type
         self.content_url = content_url
-        self.content = None
+        self.content = b""
+        self.entry = pyfuse3.EntryAttributes()
+
+        self.entry.st_mode = mode
+        self.entry.st_size = size
+        self.entry.st_atime_ns = timestamp
+        self.entry.st_ctime_ns = timestamp
+        self.entry.st_mtime_ns = timestamp
+        self.entry.st_gid = os.getgid()
+        self.entry.st_uid = os.getuid()
+        self.entry.st_ino = inode
 
     def download(self):
-        if self.content is None:
+        if len(self.content) == 0:
             r = requests.get(self.content_url, params={'access_token': KEY})
             self.content = r.content
         return self.content
 
-def get_files(record):
+def get_files(record, next_available_inode):
     r = requests.get(f"https://zenodo.org/api/records/{record}", params={'access_token': KEY})
     data = r.json()
-    files = []
+    files = {}
     with open("result.json", "w") as jf:
         jf.write(json.dumps(data))
     for file in data["files"]:
         print(file["key"])
-        files.append(ZenodoFile(str.encode(file["key"]), file["size"], "file", file["links"]["self"]))
-    return files
+        files[next_available_inode] = ZenodoFile(next_available_inode, str.encode(file["key"]),  "file", file["links"]["self"], (stat.S_IFREG | 0o644), file["size"], int(time.time() * 1e9))
+        #files.append(ZenodoFile(next_available_inode, str.encode(file["key"]), file["size"], "file", file["links"]["self"]))
+        next_available_inode += 1
+    return files, next_available_inode
 
 
 class ZenodoFS(pyfuse3.Operations):
@@ -64,66 +77,84 @@ class ZenodoFS(pyfuse3.Operations):
         #self.root = ZenodoDirectory("root", pyfuse3.ROOT_INODE)
         #self.root.files = get_files(self.record)
 
-        self.files = get_files(self.record)
+        #self.files = get_files(self.record)
+        self.next_available_inode = pyfuse3.ROOT_INODE + 1
+        self.current_folder = pyfuse3.ROOT_INODE
+        self.files = {}
+        self.files[pyfuse3.ROOT_INODE], self.next_available_inode = get_files(self.record, self.next_available_inode)
+
+
         #self.next_inode = pyfuse3.ROOT_INODE + len(self.files)
         #print(pyfuse3.ROOT_INODE)
         #print(len(self.files))
 
     async def getattr(self, inode, ctx=None):
         print(f"[getattr] {inode}")
-        entry = pyfuse3.EntryAttributes()
-        if inode == pyfuse3.ROOT_INODE:
+        #if inode == pyfuse3.ROOT_INODE:
+
+        if inode == self.current_folder or inode == pyfuse3.ROOT_INODE:
+            entry = pyfuse3.EntryAttributes()
             entry.st_mode = (stat.S_IFDIR | 0o755)
             entry.st_size = 0
-        elif inode - pyfuse3.ROOT_INODE > len(self.files):
-            print("hophophop")
-            raise pyfuse3.FUSEError(errno.ENOENT)
+            stamp = int(time.time() * 1e9)
+            entry.st_atime_ns = stamp
+            entry.st_ctime_ns = stamp
+            entry.st_mtime_ns = stamp
+            entry.st_gid = os.getgid()
+            entry.st_uid = os.getuid()
+            entry.st_ino = inode
+            return entry
+        #elif inode not in self.files[self.current_folder].keys():
+        #    print("hophophop")
+        #    raise pyfuse3.FUSEError(errno.ENOENT)
         else:
-            file = self.files[inode - pyfuse3.ROOT_INODE - 1]
-            if file.type == "file":
-                entry.st_mode = (stat.S_IFREG | 0o644)
-            elif file.type == "directory":
-                entry.st_mode = (stat.S_IFDIR | 0o755)
-            else:
-                print(f"Unknown file type `{file.type}`")
-                raise pyfuse3.FUSEError(errno.ENOENT)
+            for k in self.files.keys():
+                if inode in self.files[k].keys():
+                    return self.files[k][inode].entry
+            #return self.files[self.current_folder][inode].entry
+        #file = self.files[self.current_folder][inode]
+            #if file.type == "file":
+            #    entry.st_mode = (stat.S_IFREG | 0o644)
+            #elif file.type == "directory":
+            #    entry.st_mode = (stat.S_IFDIR | 0o755)
+            #else:
+            #    print(f"Unknown file type `{file.type}`")
+            #    raise pyfuse3.FUSEError(errno.ENOENT)
 
-            entry.st_size = file.size
+            #entry.st_size = file.size
 
-        # TODO: use correct date
-        stamp = int(1438467123.985654 * 1e9)
-        entry.st_atime_ns = stamp
-        entry.st_ctime_ns = stamp
-        entry.st_mtime_ns = stamp
-        entry.st_gid = os.getgid()
-        entry.st_uid = os.getuid()
-        entry.st_ino = inode
 
-        return entry
+        print("WTF?")
 
     async def lookup(self, parent_inode, name, ctx=None):
         print(f"[lookup] {parent_inode} {name}")
-        if parent_inode != pyfuse3.ROOT_INODE:# or name != self.hello_name:
+        #if parent_inode != pyfuse3.ROOT_INODE:# or name != self.hello_name:
+        if parent_inode != self.current_folder:# or name != self.hello_name:
             raise pyfuse3.FUSEError(errno.ENOENT)
-        for (i, f) in enumerate(self.files):
+        for (i, f) in self.files[self.current_folder].items():
+            #for (i, f) in self.files[parent_inode].items():
             if f.filename == name:
                 print(f"[lookup] `{name}` found!")
-                return await self.getattr(pyfuse3.ROOT_INODE+i+1)
+                return await self.getattr(i)
         raise pyfuse3.FUSEError(errno.ENOENT)
 
     async def opendir(self, inode, ctx):
         print(f"[opendir] {inode}")
-        if inode != pyfuse3.ROOT_INODE:
+        #if inode != self.current_folder:
+        #    raise pyfuse3.FUSEError(errno.ENOENT)
+        if inode not in self.files.keys():
             raise pyfuse3.FUSEError(errno.ENOENT)
+        self.current_folder = inode
         return inode
 
     async def readdir(self, fh, start_id, token):
         print(f"[readdir] {fh} {start_id} {token}")
-        assert fh == pyfuse3.ROOT_INODE
+        #assert fh == pyfuse3.ROOT_INODE
+        assert fh == self.current_folder
 
-        for (file_id, file) in enumerate(self.files[start_id:]):
+        for (i, file) in list(self.files[self.current_folder].items())[start_id:]:
             pyfuse3.readdir_reply(
-                token, file.filename, await self.getattr(pyfuse3.ROOT_INODE + start_id + file_id + 1), 1+start_id+file_id)
+                token, file.filename, await self.getattr(i), i)
 
         return
 
@@ -137,8 +168,9 @@ class ZenodoFS(pyfuse3.Operations):
 
     async def read(self, fh, off, size):
         print(f"[read] {fh} {off} {size}")
-        assert fh - pyfuse3.ROOT_INODE - 1 >= 0 and fh - pyfuse3.ROOT_INODE - 1 < len(self.files)
-        return self.files[fh - pyfuse3.ROOT_INODE - 1].download()[off:off+size]
+        #assert fh - pyfuse3.ROOT_INODE - 1 >= 0 and fh - pyfuse3.ROOT_INODE - 1 < len(self.files)
+        #return self.files[fh - pyfuse3.ROOT_INODE - 1].download()[off:off+size]
+        return self.files[self.current_folder][fh].download()[off:off+size]
 
     async def _create(self, inode_p, name, mode, ctx, rdev=0, target=None):
         print(f"[_create] {inode_p} {name} {mode}")
@@ -147,33 +179,56 @@ class ZenodoFS(pyfuse3.Operations):
             name, inode_p)
             raise FUSEError(errno.EINVAL)
 
-        now_ns = int(time.time() * 1e9)
-        inode = self.next_inode
-        self.next_inode += 1
+        inode = self.next_available_inode
+        self.next_available_inode += 1
 
-        entry = pyfuse3.EntryAttributes()
-        entry.st_mode = mode
-        entry.st_size = 0
-
-        entry.st_atime_ns = now_ns
-        entry.st_ctime_ns = now_ns
-        entry.st_mtime_ns = now_ns
-        entry.st_gid = os.getgid()
-        entry.st_uid = os.getuid()
-        entry.st_ino = inode
-
-        self.files.append(ZenodoFile(name, 0, "directory", ""))
-        #self.cursor.execute('INSERT INTO inodes (uid, gid, mode, mtime_ns, atime_ns, '
-        #    'ctime_ns, target, rdev) VALUES(?, ?, ?, ?, ?, ?, ?, ?)',
-        #(ctx.uid, ctx.gid, mode, now_ns, now_ns, now_ns, target, rdev))
-        
-        #self.db.execute("INSERT INTO contents(name, inode, parent_inode) VALUES(?,?,?)",
-        #(name, inode, inode_p))
+        #if inode_p not in self.files.keys():
+        #    self.files[inode_p] = {}
+        #self.files[inode_p][inode] = ZenodoFile(inode, name, "directory", "", mode, 0, int(time.time() * 1e9))
+        #self.files[self.current_folder][inode] = ZenodoFile(inode, name, "directory", "", mode, 0, int(time.time() * 1e9))
         return await self.getattr(inode)
 
     async def mkdir(self, inode_p, name, mode, ctx):
         print(f"[mkdir] {inode_p} {name} {mode}")
         return await self._create(inode_p, name, mode, ctx)
+
+    async def write(self, fh, offset, buf):
+        print(f"[write] {fh} {offset} {len(buf)}")
+        current_content = self.files[self.current_folder][fh].content
+        self.files[self.current_folder][fh].content = current_content[:offset] + buf + current_content[offset+len(buf):]
+        self.files[self.current_folder][fh].entry.st_size += len(buf)
+        return len(buf)
+
+    async def create(self, inode_parent, name, mode, flags, ctx):
+        print(f"[create] {inode_parent} {name} {mode} {flags}")
+        inode = self.next_available_inode
+        self.next_available_inode += 1
+        if inode_parent not in self.files.keys():
+            self.files[inode_parent] = {}
+
+        self.files[self.current_folder][inode] = ZenodoFile(inode, name, "file", "", mode, 0, int(time.time() * 1e9))
+        #self.files[inode_parent][inode] = ZenodoFile(inode, name, "file", "", mode, 0, int(time.time() * 1e9))
+        entry = self.files[self.current_folder][inode].entry
+        #entry = self.files[inode_parent][inode].entry
+        return (pyfuse3.FileInfo(fh=entry.st_ino), entry)
+
+    async def setattr(self, inode, attr, fields, fh, ctx):
+        print(f"[setattr] {inode} {attr} {fields} {fh}")
+        if fields.update_size:
+            print("update_size")
+            self.files[self.current_folder][inode].entry.st_size = attr.st_size
+        if fields.update_mode:
+            print("update_mode")
+            self.files[self.current_folder][inode].entry.st_mode = attr.st_mode
+        if fields.update_atime:
+            print("update atime")
+            self.files[self.current_folder][inode].entry.st_atime_ns = attr.st_atime_ns
+        if fields.update_mtime:
+            print("update mtime")
+            self.files[self.current_folder][inode].entry.st_mtime_ns = attr.st_mtime_ns
+        return await self.getattr(inode)
+
+
 
 
 def init_logging(debug=False):

@@ -7,8 +7,8 @@
 
   outputs = { self, nixpkgs }:
     let
-      #system = "x86_64-linux";
-      system = "aarch64-darwin";
+      system = "x86_64-linux";
+      #system = "aarch64-darwin";
       pkgs = import nixpkgs { inherit system; };
     in
     {
@@ -18,7 +18,7 @@
           packages = with pkgs; [
             (python3.withPackages (ps: with ps; [
               requests
-              #pyfuse3
+              pyfuse3
             ]))
           ];
         };

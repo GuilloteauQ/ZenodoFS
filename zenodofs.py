@@ -21,7 +21,6 @@ def read_key():
     with open("KEY", "r") as f:
         key = f.read()
     return key
-KEY=read_key()
 
 class ZenodoFile:
     def __init__(self, inode, filename, type, content_url, mode, size, timestamp):
@@ -42,14 +41,14 @@ class ZenodoFile:
         self.entry.st_uid = os.getuid()
         self.entry.st_ino = inode
 
-    def download(self):
+    def download(self, key):
         if len(self.content) == 0:
-            r = requests.get(self.content_url, params={'access_token': KEY})
+            r = requests.get(self.content_url, params={'access_token': key})
             self.content = r.content
         return self.content
 
-def add_files(record, inodes):
-    r = requests.get(f"https://zenodo.org/api/records/{record}", params={'access_token': KEY})
+def add_files(record, inodes, key):
+    r = requests.get(f"https://zenodo.org/api/records/{record}", params={'access_token': key})
     data = r.json()
     inodes_nb = [] 
     for file in data["files"]:
@@ -58,14 +57,15 @@ def add_files(record, inodes):
     return inodes_nb
 
 class ZenodoFS(pyfuse3.Operations):
-    def __init__(self, record):
+    def __init__(self, record, key):
         super(ZenodoFS, self).__init__()
         self.record = record
         self.current_folder = pyfuse3.ROOT_INODE
+        self.key = key
 
         self.inodes = [None, pyfuse3.ROOT_INODE]
         self.folders = {}
-        self.folders[pyfuse3.ROOT_INODE] = add_files(self.record, self.inodes)
+        self.folders[pyfuse3.ROOT_INODE] = add_files(self.record, self.inodes, self.key)
 
     async def getattr(self, inode, ctx=None):
         log.debug(f"[getattr] {inode}")
@@ -119,7 +119,7 @@ class ZenodoFS(pyfuse3.Operations):
 
     async def read(self, fh, off, size):
         log.debug(f"[read] {fh} {off} {size}")
-        return self.inodes[fh].download()[off:off+size]
+        return self.inodes[fh].download(self.key)[off:off+size]
 
     async def _create(self, inode_p, name, mode, ctx, rdev=0, target=None):
         log.debug(f"[_create] {inode_p} {name} {mode}")
@@ -187,12 +187,13 @@ def parse_args():
 
     parser = ArgumentParser()
 
-    parser.add_argument('mountpoint', type=str,
+    parser.add_argument('--mnt', type=str, required=True,
                         help='Where to mount the file system')
     parser.add_argument('--debug', action='store_true', default=False,
                         help='Enable debugging output')
     parser.add_argument('--debug-fuse', action='store_true', default=False,
                         help='Enable FUSE debugging output')
+    parser.add_argument('--api-key', required=True, help='Zenodo API Key')
     parser.add_argument('record', help='Zenodo Record ID')
     return parser.parse_args()
 
@@ -203,13 +204,16 @@ def main():
     record = options.record
     #RECORD="11208389"
     #RECORD="6568218"
+    api_key = options.api_key
+    if api_key is None:
+        api_key=read_key()
 
-    zenodofs = ZenodoFS(record)
+    zenodofs = ZenodoFS(record, api_key)
     fuse_options = set(pyfuse3.default_options)
     fuse_options.add('fsname=ZenodoFS')
     if options.debug_fuse:
         fuse_options.add('debug')
-    pyfuse3.init(zenodofs, options.mountpoint, fuse_options)
+    pyfuse3.init(zenodofs, options.mnt, fuse_options)
     try:
         trio.run(pyfuse3.main)
     except:
